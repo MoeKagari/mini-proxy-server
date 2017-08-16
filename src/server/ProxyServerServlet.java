@@ -68,6 +68,7 @@ public class ProxyServerServlet extends HttpServlet {
 		this.server.start();
 	}
 
+	/** 默认不检查 config 配置是否改变 */
 	public void restart() throws Exception {
 		this.server.stop();
 		this.setConnector();
@@ -298,6 +299,7 @@ public class ProxyServerServlet extends HttpServlet {
 				this.handler.onContent(this.httpResponse, buffer, offset, length);
 			} catch (IOException e) {
 				proxyResponse.abort(e);
+				e.printStackTrace();
 			}
 		}
 
@@ -307,6 +309,7 @@ public class ProxyServerServlet extends HttpServlet {
 				this.handler.onSuccess(this.httpRequest, this.httpResponse, this.headers, this.requestBody, this.responseBody);
 			} catch (IOException e) {
 				proxyResponse.abort(e);
+				e.printStackTrace();
 			}
 			this.asyncContext.complete();
 		}
@@ -339,10 +342,11 @@ public class ProxyServerServlet extends HttpServlet {
 								return ProxyRequestHandler.this.httpRequest.getContentLength();
 							}
 						});
+				//onRequestContent(this) 重复使用,会导致 requestBody 重复记录,所以重置 requestBody
+				this.requestBody.reset();
 				proxyRequest.onRequestContent(this);
 				proxyRequest.send(this);
 			}
 		}
 	}
-
 }
