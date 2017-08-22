@@ -26,7 +26,6 @@ import javax.servlet.http.HttpServletResponse;
 import org.eclipse.jetty.client.HttpClient;
 import org.eclipse.jetty.client.api.ProxyConfiguration;
 import org.eclipse.jetty.client.api.Request;
-import org.eclipse.jetty.client.api.Request.ContentListener;
 import org.eclipse.jetty.client.api.Response;
 import org.eclipse.jetty.client.api.Result;
 import org.eclipse.jetty.client.util.InputStreamContentProvider;
@@ -41,7 +40,7 @@ import org.eclipse.jetty.servlet.ServletHolder;
 import org.eclipse.jetty.util.HttpCookieStore;
 import org.eclipse.jetty.util.thread.QueuedThreadPool;
 
-import tool.FunctionUtils;
+import tool.function.FunctionUtils;
 
 @SuppressWarnings("serial")
 public class ProxyServerServlet extends HttpServlet {
@@ -149,7 +148,7 @@ public class ProxyServerServlet extends HttpServlet {
 		return new CommunicationHandler(serverName, uri) {
 			@Override
 			public void onSuccess(HttpServletRequest httpRequest, HttpServletResponse httpResponse, Map<String, String> headers, ByteArrayOutputStream requestBody, ByteArrayOutputStream responseBody) throws IOException {
-
+				//nothing to do
 			}
 		};
 	}
@@ -162,23 +161,40 @@ public class ProxyServerServlet extends HttpServlet {
 		String url = httpRequest.getRequestURL() + FunctionUtils.notNull(httpRequest.getQueryString(), query -> "?" + query, "");
 		URI targetUri = URI.create(url);
 
-		ProxyRequestHandler prh = new ProxyRequestHandler(httpRequest, httpResponse, asyncContext, targetUri);
-		prh.send();
+		new ProxyRequestHandler(httpRequest, httpResponse, targetUri).send();
+		asyncContext.complete();
 	}
 
-	private class ProxyRequestHandler extends Response.Listener.Empty implements ContentListener {
-		private final URI targetUri;
+	protected class ProxyRequestHandler extends Response.Listener.Empty {
 		private final ByteArrayOutputStream requestBody = new ByteArrayOutputStream();
 		private final ByteArrayOutputStream responseBody = new ByteArrayOutputStream();
+		private final ByteArrayOutputStream contentBuffer = new ByteArrayOutputStream();
 		private final Map<String, String> headers = new HashMap<>();
+
+		private final URI targetUri;
 		private final HttpServletRequest httpRequest;
 		private final HttpServletResponse httpResponse;
 		private final InputStream httpRequestInputStream;
-
 		private final CommunicationHandler handler;
-		private final AsyncContext asyncContext;
-		private final ByteArrayOutputStream contentBuffer = new ByteArrayOutputStream();
 		private boolean retryEnabled = true;
+		private static final int REQUEST_CONTENT_SIZE_LIMIT = 256 * 1024;
+
+		public void onRequestContent(Request request, ByteBuffer content) {
+			if (this.handler.storeRequestBody()) {
+				byte[] buffer;
+				int offset;
+				int length = content.remaining();
+				if (content.hasArray()) {
+					buffer = content.array();
+					offset = content.arrayOffset();
+				} else {
+					buffer = new byte[length];
+					content.get(buffer);
+					offset = 0;
+				}
+				this.requestBody.write(buffer, offset, length);
+			}
+		}
 
 		private Request createProxyRequest(HttpServletRequest httpRequest, URI targetUri, InputStreamContentProvider contentProvider) {
 			Request proxyRequest = ProxyServerServlet.this.client.newRequest(targetUri).method(HttpMethod.fromString(httpRequest.getMethod())).version(HttpVersion.fromString(httpRequest.getProtocol()));
@@ -210,7 +226,7 @@ public class ProxyServerServlet extends HttpServlet {
 				@Override
 				protected ByteBuffer onRead(byte[] buffer, int offset, int length) {
 					if (length > 0) {
-						if (ProxyRequestHandler.this.contentBuffer.size() < 256 * 1024) {
+						if (ProxyRequestHandler.this.contentBuffer.size() < REQUEST_CONTENT_SIZE_LIMIT) {
 							ProxyRequestHandler.this.contentBuffer.write(buffer, offset, length);
 						} else {
 							ProxyRequestHandler.this.retryEnabled = false;
@@ -219,40 +235,21 @@ public class ProxyServerServlet extends HttpServlet {
 					return super.onRead(buffer, offset, length);
 				}
 			});
-			proxyRequest.onRequestContent(this);
+			proxyRequest.onRequestContent(this::onRequestContent);
 			proxyRequest.send(this);
 		}
 
-		@Override
-		public void onContent(Request request, ByteBuffer content) {
-			if (this.handler.storeRequestBody()) {
-				byte[] buffer;
-				int offset;
-				int length = content.remaining();
-				if (content.hasArray()) {
-					buffer = content.array();
-					offset = content.arrayOffset();
-				} else {
-					buffer = new byte[length];
-					content.get(buffer);
-					offset = 0;
-				}
-				this.requestBody.write(buffer, offset, length);
-			}
-		}
-
-		public ProxyRequestHandler(HttpServletRequest httpRequest, HttpServletResponse httpResponse, AsyncContext asyncContext, URI targetUri) throws IOException {
+		public ProxyRequestHandler(HttpServletRequest httpRequest, HttpServletResponse httpResponse, URI targetUri) throws IOException {
+			this.targetUri = targetUri;
 			this.httpRequest = httpRequest;
 			this.httpResponse = httpResponse;
 			this.httpRequestInputStream = httpRequest.getInputStream();
-
 			this.handler = ProxyServerServlet.this.getHandler(httpRequest.getServerName(), httpRequest.getRequestURI());
-			this.asyncContext = asyncContext;
-			this.targetUri = targetUri;
 		}
 
 		@Override
 		public void onBegin(Response proxyResponse) {
+			//有回应,则不retry
 			this.retryEnabled = false;
 			this.httpResponse.setStatus(proxyResponse.getStatus());
 		}
@@ -311,7 +308,6 @@ public class ProxyServerServlet extends HttpServlet {
 				proxyResponse.abort(e);
 				e.printStackTrace();
 			}
-			this.asyncContext.complete();
 		}
 
 		@Override
@@ -328,7 +324,6 @@ public class ProxyServerServlet extends HttpServlet {
 					this.httpResponse.setStatus(HttpServletResponse.SC_BAD_GATEWAY);
 				}
 			}
-			this.asyncContext.complete();
 		}
 
 		@Override
@@ -342,9 +337,9 @@ public class ProxyServerServlet extends HttpServlet {
 								return ProxyRequestHandler.this.httpRequest.getContentLength();
 							}
 						});
-				//onRequestContent(this) 重复使用,会导致 requestBody 重复记录,所以重置 requestBody
+				//onRequestContent(this::onRequestContent) 重复使用,会导致 requestBody 重复记录,所以重置 requestBody
 				this.requestBody.reset();
-				proxyRequest.onRequestContent(this);
+				proxyRequest.onRequestContent(this::onRequestContent);
 				proxyRequest.send(this);
 			}
 		}
