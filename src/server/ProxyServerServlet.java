@@ -161,8 +161,7 @@ public class ProxyServerServlet extends HttpServlet {
 		String url = httpRequest.getRequestURL() + FunctionUtils.notNull(httpRequest.getQueryString(), query -> "?" + query, "");
 		URI targetUri = URI.create(url);
 
-		new ProxyRequestHandler(httpRequest, httpResponse, targetUri).send();
-		asyncContext.complete();
+		new ProxyRequestHandler(httpRequest, httpResponse, targetUri, asyncContext).send();
 	}
 
 	protected class ProxyRequestHandler extends Response.Listener.Empty {
@@ -171,6 +170,7 @@ public class ProxyServerServlet extends HttpServlet {
 		private final ByteArrayOutputStream contentBuffer = new ByteArrayOutputStream();
 		private final Map<String, String> headers = new HashMap<>();
 
+		private final AsyncContext asyncContext;
 		private final URI targetUri;
 		private final HttpServletRequest httpRequest;
 		private final HttpServletResponse httpResponse;
@@ -239,7 +239,8 @@ public class ProxyServerServlet extends HttpServlet {
 			proxyRequest.send(this);
 		}
 
-		public ProxyRequestHandler(HttpServletRequest httpRequest, HttpServletResponse httpResponse, URI targetUri) throws IOException {
+		public ProxyRequestHandler(HttpServletRequest httpRequest, HttpServletResponse httpResponse, URI targetUri, AsyncContext asyncContext) throws IOException {
+			this.asyncContext = asyncContext;
 			this.targetUri = targetUri;
 			this.httpRequest = httpRequest;
 			this.httpResponse = httpResponse;
@@ -308,6 +309,7 @@ public class ProxyServerServlet extends HttpServlet {
 				proxyResponse.abort(e);
 				e.printStackTrace();
 			}
+			this.asyncContext.complete();
 		}
 
 		@Override
@@ -324,6 +326,7 @@ public class ProxyServerServlet extends HttpServlet {
 					this.httpResponse.setStatus(HttpServletResponse.SC_BAD_GATEWAY);
 				}
 			}
+			this.asyncContext.complete();
 		}
 
 		@Override
