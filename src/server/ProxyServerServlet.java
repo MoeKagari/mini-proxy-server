@@ -58,10 +58,11 @@ public class ProxyServerServlet extends HttpServlet {
 		ConnectHandler proxy = new ConnectHandler();
 		this.server.setHandler(proxy);
 
-		ServletContextHandler context = new ServletContextHandler(proxy, "/", ServletContextHandler.SESSIONS);
 		ServletHolder holder = new ServletHolder(this);
 		holder.setInitParameter("maxThreads", "256");
 		holder.setInitParameter("timeout", "600000");
+
+		ServletContextHandler context = new ServletContextHandler(proxy, "/", ServletContextHandler.SESSIONS);
 		context.addServlet(holder, "/*");
 
 		this.server.start();
@@ -250,6 +251,9 @@ public class ProxyServerServlet extends HttpServlet {
 
 		@Override
 		public void onBegin(Response proxyResponse) {
+			if (this.handler.useLog()) {
+				System.out.println("onBegin");
+			}
 			//有回应,则不retry
 			this.retryEnabled = false;
 			this.httpResponse.setStatus(proxyResponse.getStatus());
@@ -257,6 +261,9 @@ public class ProxyServerServlet extends HttpServlet {
 
 		@Override
 		public void onHeaders(Response proxyResponse) {
+			if (this.handler.useLog()) {
+				System.out.println("onHeaders");
+			}
 			if (this.handler.storeResponseHeaders()) {
 				this.filterHeaders(proxyResponse, this.headers::put);
 			}
@@ -277,6 +284,9 @@ public class ProxyServerServlet extends HttpServlet {
 
 		@Override
 		public void onContent(Response proxyResponse, ByteBuffer content) {
+			if (this.handler.useLog()) {
+				System.out.println("onContent");
+			}
 			byte[] buffer;
 			int offset;
 			int length = content.remaining();
@@ -303,6 +313,9 @@ public class ProxyServerServlet extends HttpServlet {
 
 		@Override
 		public void onSuccess(Response proxyResponse) {
+			if (this.handler.useLog()) {
+				System.out.println("onSuccess");
+			}
 			try {
 				this.handler.onSuccess(this.httpRequest, this.httpResponse, this.headers, this.requestBody, this.responseBody);
 			} catch (IOException e) {
@@ -314,6 +327,9 @@ public class ProxyServerServlet extends HttpServlet {
 
 		@Override
 		public void onFailure(Response proxyResponse, Throwable failure) {
+			if (this.handler.useLog()) {
+				System.out.println("onFailure");
+			}
 			if (this.retryEnabled && (failure instanceof EOFException) && (HttpVersion.fromString(this.httpRequest.getProtocol()) == HttpVersion.HTTP_1_1)) {
 				return;
 			}
@@ -331,6 +347,9 @@ public class ProxyServerServlet extends HttpServlet {
 
 		@Override
 		public void onComplete(Result result) {
+			if (this.handler.useLog()) {
+				System.out.println("onComplete");
+			}
 			if (this.retryEnabled) {
 				this.retryEnabled = false;//不第二次retry
 				Request proxyRequest = this.createProxyRequest(this.httpRequest, this.targetUri,
