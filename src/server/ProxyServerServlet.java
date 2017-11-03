@@ -16,6 +16,9 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.BiConsumer;
+import java.util.function.BooleanSupplier;
+import java.util.function.IntSupplier;
+import java.util.function.Supplier;
 
 import javax.servlet.AsyncContext;
 import javax.servlet.ServletException;
@@ -31,7 +34,6 @@ import org.eclipse.jetty.client.api.Result;
 import org.eclipse.jetty.client.util.InputStreamContentProvider;
 import org.eclipse.jetty.http.HttpMethod;
 import org.eclipse.jetty.http.HttpVersion;
-import org.eclipse.jetty.proxy.ConnectHandler;
 import org.eclipse.jetty.server.Connector;
 import org.eclipse.jetty.server.Server;
 import org.eclipse.jetty.server.ServerConnector;
@@ -42,28 +44,54 @@ import org.eclipse.jetty.util.thread.QueuedThreadPool;
 
 import tool.function.FunctionUtils;
 
-@SuppressWarnings("serial")
-public class ProxyServerServlet extends HttpServlet {
+public class ProxyServerServlet {
+	private final HttpServlet httpServlet;
 	private final ServerConfig config;
 	private final Server server;
 
+	public ProxyServerServlet(IntSupplier listenPort, BooleanSupplier useProxy, Supplier<String> proxyHost, IntSupplier proxyPort) {
+		this(new ServerConfig(listenPort, useProxy, proxyHost, proxyPort));
+	}
+
+	@SuppressWarnings("serial")
 	public ProxyServerServlet(ServerConfig config) {
 		this.config = config;
 		this.server = new Server();
+		this.httpServlet = new HttpServlet() {
+			@Override
+			public void destroy() {
+				ProxyServerServlet.this.destroy();
+			}
+
+			@Override
+			public void init() throws ServletException {
+				ProxyServerServlet.this.init();
+			}
+
+			@Override
+			protected void service(HttpServletRequest httpRequest, HttpServletResponse httpResponse) throws ServletException, IOException {
+				ProxyServerServlet.this.service(httpRequest, httpResponse);
+			}
+		};
+	}
+
+	private void setConnector() {
+		ServerConnector connector = new ServerConnector(this.server);
+		connector.setHost("127.0.0.1");
+		connector.setPort(this.config.getListenPort());
+		this.server.setConnectors(new Connector[] { connector });
 	}
 
 	public void start() throws Exception {
 		this.setConnector();
 
-		ConnectHandler proxy = new ConnectHandler();
-		this.server.setHandler(proxy);
-
-		ServletHolder holder = new ServletHolder(this);
+		ServletHolder holder = new ServletHolder(this.httpServlet);
 		holder.setInitParameter("maxThreads", "256");
 		holder.setInitParameter("timeout", "600000");
 
-		ServletContextHandler context = new ServletContextHandler(proxy, "/", ServletContextHandler.SESSIONS);
+		ServletContextHandler context = new ServletContextHandler(ServletContextHandler.SESSIONS);
 		context.addServlet(holder, "/*");
+		this.server.setHandler(context);
 
 		this.server.start();
 	}
@@ -78,13 +106,6 @@ public class ProxyServerServlet extends HttpServlet {
 	public void end() throws Exception {
 		this.server.stop();
 		this.server.join();
-	}
-
-	private void setConnector() {
-		ServerConnector connector = new ServerConnector(this.server);
-		connector.setHost("127.0.0.1");
-		connector.setPort(this.config.getListenPort());
-		this.server.setConnectors(new Connector[] { connector });
 	}
 
 	public ServerConfig getConfig() {
@@ -108,8 +129,7 @@ public class ProxyServerServlet extends HttpServlet {
 
 	private HttpClient client;
 
-	@Override
-	public void destroy() {
+	private void destroy() {
 		try {
 			this.client.stop();
 		} catch (Exception e) {
@@ -117,15 +137,14 @@ public class ProxyServerServlet extends HttpServlet {
 		}
 	}
 
-	@Override
-	public void init() throws ServletException {
+	private void init() throws ServletException {
 		this.client = new HttpClient();
 		if (this.config.isUseProxy()) {
 			this.client.setProxyConfiguration(new ProxyConfiguration(this.config.getProxyHost(), this.config.getProxyPort()));
 		}
 
 		QueuedThreadPool executor = new QueuedThreadPool(256);
-		String servletName = this.getServletConfig().getServletName();
+		String servletName = this.httpServlet.getServletConfig().getServletName();
 		int dot = servletName.lastIndexOf('.');
 		if (dot >= 0) servletName = servletName.substring(dot + 1);
 		executor.setName(servletName);
@@ -144,17 +163,6 @@ public class ProxyServerServlet extends HttpServlet {
 		}
 	}
 
-	/** 由此扩展 */
-	public CommunicationHandler getHandler(String serverName, String uri) {
-		return new CommunicationHandler(serverName, uri) {
-			@Override
-			public void onSuccess(HttpServletRequest httpRequest, HttpServletResponse httpResponse, Map<String, String> headers, ByteArrayOutputStream requestBody, ByteArrayOutputStream responseBody) throws IOException {
-				//nothing to do
-			}
-		};
-	}
-
-	@Override
 	protected void service(HttpServletRequest httpRequest, HttpServletResponse httpResponse) throws ServletException, IOException {
 		AsyncContext asyncContext = httpRequest.startAsync();
 		asyncContext.setTimeout(0);
@@ -165,7 +173,17 @@ public class ProxyServerServlet extends HttpServlet {
 		new ProxyRequestHandler(httpRequest, httpResponse, targetUri, asyncContext).send();
 	}
 
-	protected class ProxyRequestHandler extends Response.Listener.Empty {
+	/** 由此扩展 */
+	protected CommunicationHandler getHandler(String serverName, String uri) {
+		return new CommunicationHandler(serverName, uri) {
+			@Override
+			public void onSuccess(HttpServletRequest httpRequest, HttpServletResponse httpResponse, Map<String, String> headers, ByteArrayOutputStream requestBody, ByteArrayOutputStream responseBody) throws IOException {
+				//nothing to do
+			}
+		};
+	}
+
+	private class ProxyRequestHandler extends Response.Listener.Empty {
 		private final ByteArrayOutputStream requestBody = new ByteArrayOutputStream();
 		private final ByteArrayOutputStream responseBody = new ByteArrayOutputStream();
 		private final ByteArrayOutputStream contentBuffer = new ByteArrayOutputStream();

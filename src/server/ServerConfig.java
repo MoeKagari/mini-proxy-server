@@ -15,7 +15,7 @@ public class ServerConfig {
 	public ServerConfig(IntSupplier listenPort, BooleanSupplier useProxy, Supplier<String> proxyHost, IntSupplier proxyPort) {
 		this.listenPort = listenPort;
 		this.useProxy = useProxy;
-		this.proxyHost = proxyHost;
+		this.proxyHost = proxyHost == null ? () -> "127.0.0.1" : proxyHost;
 		this.proxyPort = proxyPort;
 	}
 
