@@ -14,10 +14,6 @@ public abstract class CommunicationHandler {
 	public final String serverName;
 	public final String uri;
 
-	public boolean useLog() {
-		return false;
-	}
-
 	public CommunicationHandler(String serverName, String uri) {
 		this.serverName = serverName;
 		this.uri = uri;

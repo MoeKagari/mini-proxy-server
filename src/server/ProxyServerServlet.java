@@ -12,6 +12,7 @@ import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -34,6 +35,7 @@ import org.eclipse.jetty.client.api.Result;
 import org.eclipse.jetty.client.util.InputStreamContentProvider;
 import org.eclipse.jetty.http.HttpMethod;
 import org.eclipse.jetty.http.HttpVersion;
+import org.eclipse.jetty.proxy.ConnectHandler;
 import org.eclipse.jetty.server.Connector;
 import org.eclipse.jetty.server.Server;
 import org.eclipse.jetty.server.ServerConnector;
@@ -42,37 +44,22 @@ import org.eclipse.jetty.servlet.ServletHolder;
 import org.eclipse.jetty.util.HttpCookieStore;
 import org.eclipse.jetty.util.thread.QueuedThreadPool;
 
-import tool.function.FunctionUtils;
-
-public class ProxyServerServlet {
-	private final HttpServlet httpServlet;
+@SuppressWarnings("serial")
+public class ProxyServerServlet extends HttpServlet {
+	private final static String DEFAULT_PROXYHOST = "127.0.0.1";
 	private final ServerConfig config;
-	private final Server server;
+	private Server server = new Server();
 
-	public ProxyServerServlet(IntSupplier listenPort, BooleanSupplier useProxy, Supplier<String> proxyHost, IntSupplier proxyPort) {
+	protected ProxyServerServlet(IntSupplier listenPort, BooleanSupplier useProxy, IntSupplier proxyPort) {
+		this(new ServerConfig(listenPort, useProxy, () -> DEFAULT_PROXYHOST, proxyPort));
+	}
+
+	protected ProxyServerServlet(IntSupplier listenPort, BooleanSupplier useProxy, Supplier<String> proxyHost, IntSupplier proxyPort) {
 		this(new ServerConfig(listenPort, useProxy, proxyHost, proxyPort));
 	}
 
-	@SuppressWarnings("serial")
-	public ProxyServerServlet(ServerConfig config) {
+	protected ProxyServerServlet(ServerConfig config) {
 		this.config = config;
-		this.server = new Server();
-		this.httpServlet = new HttpServlet() {
-			@Override
-			public void destroy() {
-				ProxyServerServlet.this.destroy();
-			}
-
-			@Override
-			public void init() throws ServletException {
-				ProxyServerServlet.this.init();
-			}
-
-			@Override
-			protected void service(HttpServletRequest httpRequest, HttpServletResponse httpResponse) throws ServletException, IOException {
-				ProxyServerServlet.this.service(httpRequest, httpResponse);
-			}
-		};
 	}
 
 	private void setConnector() {
@@ -85,13 +72,14 @@ public class ProxyServerServlet {
 	public void start() throws Exception {
 		this.setConnector();
 
-		ServletHolder holder = new ServletHolder(this.httpServlet);
+		ConnectHandler proxy = new ConnectHandler();
+		this.server.setHandler(proxy);
+
+		ServletContextHandler context = new ServletContextHandler(proxy, "/", ServletContextHandler.SESSIONS);
+		ServletHolder holder = new ServletHolder(this);
 		holder.setInitParameter("maxThreads", "256");
 		holder.setInitParameter("timeout", "600000");
-
-		ServletContextHandler context = new ServletContextHandler(ServletContextHandler.SESSIONS);
 		context.addServlet(holder, "/*");
-		this.server.setHandler(context);
 
 		this.server.start();
 	}
@@ -106,9 +94,10 @@ public class ProxyServerServlet {
 	public void end() throws Exception {
 		this.server.stop();
 		this.server.join();
+		this.server = null;
 	}
 
-	public ServerConfig getConfig() {
+	public final ServerConfig getConfig() {
 		return this.config;
 	}
 
@@ -129,7 +118,8 @@ public class ProxyServerServlet {
 
 	private HttpClient client;
 
-	private void destroy() {
+	@Override
+	public void destroy() {
 		try {
 			this.client.stop();
 		} catch (Exception e) {
@@ -137,14 +127,15 @@ public class ProxyServerServlet {
 		}
 	}
 
-	private void init() throws ServletException {
+	@Override
+	public void init() throws ServletException {
 		this.client = new HttpClient();
 		if (this.config.isUseProxy()) {
 			this.client.setProxyConfiguration(new ProxyConfiguration(this.config.getProxyHost(), this.config.getProxyPort()));
 		}
 
 		QueuedThreadPool executor = new QueuedThreadPool(256);
-		String servletName = this.httpServlet.getServletConfig().getServletName();
+		String servletName = this.getServletConfig().getServletName();
 		int dot = servletName.lastIndexOf('.');
 		if (dot >= 0) servletName = servletName.substring(dot + 1);
 		executor.setName(servletName);
@@ -163,14 +154,35 @@ public class ProxyServerServlet {
 		}
 	}
 
+	@Override
 	protected void service(HttpServletRequest httpRequest, HttpServletResponse httpResponse) throws ServletException, IOException {
 		AsyncContext asyncContext = httpRequest.startAsync();
 		asyncContext.setTimeout(0);
 
-		String url = httpRequest.getRequestURL() + FunctionUtils.notNull(httpRequest.getQueryString(), query -> "?" + query, "");
+		String url = httpRequest.getRequestURL() + Optional.ofNullable(httpRequest.getQueryString()).map(query -> "?" + query).orElse("");
 		URI targetUri = URI.create(url);
 
 		new ProxyRequestHandler(httpRequest, httpResponse, targetUri, asyncContext).send();
+	}
+
+	private Request createProxyRequest(HttpServletRequest httpRequest, URI targetUri, InputStreamContentProvider contentProvider) {
+		Request proxyRequest = this.client.newRequest(targetUri).method(HttpMethod.fromString(httpRequest.getMethod())).version(HttpVersion.fromString(httpRequest.getProtocol()));
+
+		for (Enumeration<String> headerNames = httpRequest.getHeaderNames(); headerNames.hasMoreElements();) {
+			String headerName = headerNames.nextElement();
+			if (HOP_HEADERS.stream().noneMatch(name -> name.equalsIgnoreCase(headerName))) {
+				for (Enumeration<String> headerValues = httpRequest.getHeaders(headerName); headerValues.hasMoreElements();) {
+					String headerValue = headerValues.nextElement();
+					if (headerValue != null) {
+						proxyRequest.header(headerName, headerValue);
+					}
+				}
+			}
+		}
+
+		proxyRequest.content(contentProvider);
+		proxyRequest.timeout(this.config.getProxyTimeOut(), TimeUnit.MILLISECONDS);
+		return proxyRequest;
 	}
 
 	/** 由此扩展 */
@@ -215,45 +227,28 @@ public class ProxyServerServlet {
 			}
 		}
 
-		private Request createProxyRequest(HttpServletRequest httpRequest, URI targetUri, InputStreamContentProvider contentProvider) {
-			Request proxyRequest = ProxyServerServlet.this.client.newRequest(targetUri).method(HttpMethod.fromString(httpRequest.getMethod())).version(HttpVersion.fromString(httpRequest.getProtocol()));
-
-			for (Enumeration<String> headerNames = httpRequest.getHeaderNames(); headerNames.hasMoreElements();) {
-				String headerName = headerNames.nextElement();
-				if (HOP_HEADERS.stream().noneMatch(name -> name.equalsIgnoreCase(headerName))) {
-					for (Enumeration<String> headerValues = httpRequest.getHeaders(headerName); headerValues.hasMoreElements();) {
-						String headerValue = headerValues.nextElement();
-						if (headerValue != null) {
-							proxyRequest.header(headerName, headerValue);
-						}
-					}
-				}
-			}
-
-			proxyRequest.content(contentProvider);
-			proxyRequest.timeout(ProxyServerServlet.this.config.getProxyTimeOut(), TimeUnit.MILLISECONDS);
-			return proxyRequest;
-		}
-
 		private void send() {
-			Request proxyRequest = this.createProxyRequest(this.httpRequest, this.targetUri, new InputStreamContentProvider(this.httpRequestInputStream) {
-				@Override
-				public long getLength() {
-					return ProxyRequestHandler.this.httpRequest.getContentLength();
-				}
+			Request proxyRequest = ProxyServerServlet.this.createProxyRequest(
+					this.httpRequest, this.targetUri,
+					new InputStreamContentProvider(this.httpRequestInputStream) {
+						@Override
+						public long getLength() {
+							return ProxyRequestHandler.this.httpRequest.getContentLength();
+						}
 
-				@Override
-				protected ByteBuffer onRead(byte[] buffer, int offset, int length) {
-					if (length > 0) {
-						if (ProxyRequestHandler.this.contentBuffer.size() < REQUEST_CONTENT_SIZE_LIMIT) {
-							ProxyRequestHandler.this.contentBuffer.write(buffer, offset, length);
-						} else {
-							ProxyRequestHandler.this.retryEnabled = false;
+						@Override
+						protected ByteBuffer onRead(byte[] buffer, int offset, int length) {
+							if (length > 0) {
+								if (ProxyRequestHandler.this.contentBuffer.size() < REQUEST_CONTENT_SIZE_LIMIT) {
+									ProxyRequestHandler.this.contentBuffer.write(buffer, offset, length);
+								} else {
+									ProxyRequestHandler.this.retryEnabled = false;
+								}
+							}
+							return super.onRead(buffer, offset, length);
 						}
 					}
-					return super.onRead(buffer, offset, length);
-				}
-			});
+			/**/);
 			proxyRequest.onRequestContent(this::onRequestContent);
 			proxyRequest.send(this);
 		}
@@ -269,9 +264,6 @@ public class ProxyServerServlet {
 
 		@Override
 		public void onBegin(Response proxyResponse) {
-			if (this.handler.useLog()) {
-				System.out.println("onBegin");
-			}
 			//有回应,则不retry
 			this.retryEnabled = false;
 			this.httpResponse.setStatus(proxyResponse.getStatus());
@@ -279,13 +271,10 @@ public class ProxyServerServlet {
 
 		@Override
 		public void onHeaders(Response proxyResponse) {
-			if (this.handler.useLog()) {
-				System.out.println("onHeaders");
-			}
 			if (this.handler.storeResponseHeaders()) {
 				this.filterHeaders(proxyResponse, this.headers::put);
 			}
-			this.handler.onHeaders(proxyResponse, this.httpResponse, (p, h) -> this.filterHeaders(p, h::addHeader));
+			this.handler.onHeaders(proxyResponse, this.httpResponse, (r, h) -> this.filterHeaders(r, h::addHeader));
 		}
 
 		private void filterHeaders(Response proxyResponse, BiConsumer<String, String> headHandler) {
@@ -302,9 +291,6 @@ public class ProxyServerServlet {
 
 		@Override
 		public void onContent(Response proxyResponse, ByteBuffer content) {
-			if (this.handler.useLog()) {
-				System.out.println("onContent");
-			}
 			byte[] buffer;
 			int offset;
 			int length = content.remaining();
@@ -331,9 +317,6 @@ public class ProxyServerServlet {
 
 		@Override
 		public void onSuccess(Response proxyResponse) {
-			if (this.handler.useLog()) {
-				System.out.println("onSuccess");
-			}
 			try {
 				this.handler.onSuccess(this.httpRequest, this.httpResponse, this.headers, this.requestBody, this.responseBody);
 			} catch (IOException e) {
@@ -345,9 +328,6 @@ public class ProxyServerServlet {
 
 		@Override
 		public void onFailure(Response proxyResponse, Throwable failure) {
-			if (this.handler.useLog()) {
-				System.out.println("onFailure");
-			}
 			if (this.retryEnabled && (failure instanceof EOFException) && (HttpVersion.fromString(this.httpRequest.getProtocol()) == HttpVersion.HTTP_1_1)) {
 				return;
 			}
@@ -365,18 +345,17 @@ public class ProxyServerServlet {
 
 		@Override
 		public void onComplete(Result result) {
-			if (this.handler.useLog()) {
-				System.out.println("onComplete");
-			}
 			if (this.retryEnabled) {
 				this.retryEnabled = false;//不第二次retry
-				Request proxyRequest = this.createProxyRequest(this.httpRequest, this.targetUri,
+				Request proxyRequest = ProxyServerServlet.this.createProxyRequest(
+						this.httpRequest, this.targetUri,
 						new InputStreamContentProvider(new SequenceInputStream(new ByteArrayInputStream(this.contentBuffer.toByteArray()), this.httpRequestInputStream)) {
 							@Override
 							public long getLength() {
 								return ProxyRequestHandler.this.httpRequest.getContentLength();
 							}
-						});
+						}
+				/**/);
 				//onRequestContent(this::onRequestContent) 重复使用,会导致 requestBody 重复记录,所以重置 requestBody
 				this.requestBody.reset();
 				proxyRequest.onRequestContent(this::onRequestContent);
